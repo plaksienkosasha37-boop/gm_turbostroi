@@ -1,4 +1,4 @@
-name: Build TurboStroi v2.9.0 - Linux x64
+name: Build TurboStroi v2.9.0 - Linux x64 (experimental V7)
 
 on:
   workflow_dispatch:
@@ -22,21 +22,16 @@ jobs:
             https://github.com/kosmik641/gm_turbostroi.git turbostroi
           cd turbostroi
           git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = '5360f2a8ffc19238137588cb11120a8eb809b0fc'
           git describe --tags --always
 
-      - name: Build Premake 5 beta7 from source on Ubuntu 22.04
+      - name: Build Premake 5 beta7 from source
         run: |
           git clone --depth 1 --branch v5.0.0-beta7 --recurse-submodules \
             https://github.com/premake/premake-core.git premake-source
-          cd premake-source
-          make -f Bootstrap.mak linux
-          cd ..
+          make -C premake-source -f Bootstrap.mak linux
           PREMAKE_PATH="$(find premake-source -type f -name premake5 -print -quit)"
-          if [ -z "$PREMAKE_PATH" ]; then
-            echo 'ERROR: Premake binary was not produced by bootstrap.'
-            find premake-source -type f -name '*premake*' | head -30
-            exit 1
-          fi
+          test -n "$PREMAKE_PATH"
           cp "$PREMAKE_PATH" ./premake5
           chmod +x ./premake5
           ./premake5 --version
@@ -54,71 +49,162 @@ jobs:
           ../premake5 lualib2header
           ../premake5 gmake
 
-      - name: Patch 32-bit-only float packing in Source SDK
+      - name: Patch Source SDK for Linux x64 (experimental)
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          root = Path('turbostroi/external')
-          candidates = []
-          for p in root.rglob('bitbuf.h'):
-              content = p.read_text()
-              if 'static_assert(sizeof(long) == sizeof(float));' in content:
-                  candidates.append((p, content))
-          if len(candidates) != 1:
-              raise SystemExit(f'Expected exactly one original bitbuf.h, found {len(candidates)}')
+          sdk = Path('turbostroi/external/garrysmod_common/sourcesdk-minimal')
 
-          path, content = candidates[0]
-          start = content.find('BITBUF_INLINE void bf_write::WriteBitFloat(float val)')
-          if start == -1:
-              raise SystemExit('WriteBitFloat implementation not found')
-          end = content.find('\n}', start)
-          if end == -1:
-              raise SystemExit('WriteBitFloat function end not found')
-          end += 2
-          original = content[start:end]
-          expected = (
-              'long intVal;',
-              'static_assert(sizeof(long) == sizeof(float));',
-              'intVal = *((long*)&val);',
-              'WriteUBitLong( intVal, 32 );',
+          def change_once(path, old, new):
+              text = path.read_text(encoding='utf-8')
+              matches = text.count(old)
+              if matches != 1:
+                  raise SystemExit(f'{path}: expected 1 occurrence, found {matches}')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+              print(f'Patched {path}')
+
+          # NetworkVar offsets must be computed without narrowing a real pointer.
+          # The offset is still stored as int to preserve SDK interfaces.
+          networkvar = sdk / 'public/networkvar.h'
+          change_once(
+              networkvar,
+              '#define MyOffsetOf( type, var ) ( (int)&((type*)0)->var )',
+              '#define MyOffsetOf( type, var ) static_cast<int>(__builtin_offsetof(type, var))',
           )
-          if any(part not in original for part in expected):
-              raise SystemExit('Unexpected WriteBitFloat implementation; refusing to patch')
 
-          updated = (original
-              .replace('long intVal;', 'unsigned int intVal = 0;')
-              .replace('static_assert(sizeof(long) == sizeof(float));',
-                       'static_assert(sizeof(unsigned int) == sizeof(float));')
-              .replace('intVal = *((long*)&val);',
-                       '__builtin_memcpy(&intVal, &val, sizeof(val));'))
-          path.write_text(content[:start] + updated + content[end:])
-          print(f'Patched float encoding in {path}')
+          # LP64 Linux has 8-byte long, but SDK CInterlockedInt is 4 bytes.
+          # Use 4-byte GCC atomics without changing member layout/ABI.
+          threadtools = sdk / 'public/tier0/threadtools.h'
+          text = threadtools.read_text(encoding='utf-8')
+          start_marker = 'template <typename T>\nclass CInterlockedIntT\n{'
+          end_marker = '\ntypedef CInterlockedIntT<int> CInterlockedInt;'
+          if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+              raise SystemExit('Unexpected CInterlockedIntT layout in threadtools.h')
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          original = text[start:end]
+          if 'sizeof(T) == sizeof(long)' not in original:
+              raise SystemExit('Original int/long size check was not found')
+
+          atomic_64 = r'''template <typename T>
+          class CInterlockedIntT
+          {
+          public:
+              CInterlockedIntT() : m_value(0) { static_assert(sizeof(T) == 4, "32-bit atomic required"); }
+              CInterlockedIntT(T value) : m_value(value) { static_assert(sizeof(T) == 4, "32-bit atomic required"); }
+
+              T GetRaw() const { return atomic_load_n(&m_value, ATOMIC_SEQ_CST); }
+              operator T() const { return GetRaw(); }
+              bool operator!() const { return GetRaw() == 0; }
+              bool operator==(T rhs) const { return GetRaw() == rhs; }
+              bool operator!=(T rhs) const { return GetRaw() != rhs; }
+
+              T operator++() { return atomic_add_fetch(&m_value, T(1), ATOMIC_SEQ_CST); }
+              T operator++(int) { return atomic_fetch_add(&m_value, T(1), ATOMIC_SEQ_CST); }
+              T operator--() { return atomic_sub_fetch(&m_value, T(1), ATOMIC_SEQ_CST); }
+              T operator--(int) { return atomic_fetch_sub(&m_value, T(1), ATOMIC_SEQ_CST); }
+
+              bool AssignIf(T conditionValue, T newValue)
+              {
+                  return __atomic_compare_exchange_n(&m_value, &conditionValue, newValue,
+                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+              }
+              T operator=(T newValue) { atomic_store_n(&m_value, newValue, ATOMIC_SEQ_CST); return newValue; }
+              void operator+=(T add) { atomic_fetch_add(&m_value, add, ATOMIC_SEQ_CST); }
+              void operator-=(T subtract) { atomic_fetch_sub(&m_value, subtract, ATOMIC_SEQ_CST); }
+              void operator*=(T multiplier)
+              {
+                  T oldValue = GetRaw(), newValue;
+                  do { newValue = oldValue * multiplier; }
+                  while (!__atomic_compare_exchange_n(&m_value, &oldValue, newValue,
+                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST));
+              }
+              void operator/=(T divisor)
+              {
+                  T oldValue = GetRaw(), newValue;
+                  do { newValue = oldValue / divisor; }
+                  while (!__atomic_compare_exchange_n(&m_value, &oldValue, newValue,
+                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST));
+              }
+              T operator+(T rhs) const { return GetRaw() + rhs; }
+              T operator-(T rhs) const { return GetRaw() - rhs; }
+
+          private:
+              volatile T m_value;
+          };
+          '''
+          patched = (
+              '#if defined(linux) && defined(x86_64)\n'
+              + atomic_64
+              + '#else\n'
+              + original
+              + '\n#endif // Linux x86_64 atomic port\n'
+          )
+          threadtools.write_text(text[:start] + patched + text[end:], encoding='utf-8')
+          print(f'Patched {threadtools}')
+
+          # Float wire encoding is exactly 32 bits, unlike Linux LP64 long.
+          bitbufs = list(sdk.rglob('bitbuf.h'))
+          candidates = [p for p in bitbufs if 'static_assert(sizeof(long) == sizeof(float));'
+                        in p.read_text(encoding='utf-8')]
+          if len(candidates) != 1:
+              raise SystemExit(f'Expected 1 original bitbuf.h, found {len(candidates)}')
+          bitbuf = candidates[0]
+          text = bitbuf.read_text(encoding='utf-8')
+          begin = text.find('BITBUF_INLINE void bf_write::WriteBitFloat(float val)')
+          if begin < 0:
+              raise SystemExit('WriteBitFloat not found')
+          end = text.find('\n}', begin)
+          if end < 0:
+              raise SystemExit('WriteBitFloat closing brace not found')
+          end += 2
+          old = text[begin:end]
+          expected = ('long intVal;', 'static_assert(sizeof(long) == sizeof(float));',
+                      'intVal = *((long*)&val);', 'WriteUBitLong( intVal, 32 );')
+          if not all(fragment in old for fragment in expected):
+              raise SystemExit('Unexpected WriteBitFloat implementation')
+          new = (old.replace('long intVal;', 'unsigned int intVal = 0;')
+                    .replace('static_assert(sizeof(long) == sizeof(float));',
+                             'static_assert(sizeof(unsigned int) == sizeof(float));')
+                    .replace('intVal = *((long*)&val);',
+                             '__builtin_memcpy(&intVal, &val, sizeof(val));'))
+          bitbuf.write_text(text[:begin] + new + text[end:], encoding='utf-8')
+          print(f'Patched {bitbuf}')
           PY
 
-      - name: Compile TurboStroi for Linux x64
+          - name: Compile TurboStroi for Linux x64
         run: |
+          set -o pipefail
           cd turbostroi/projects/linux/gmake
-          make -j2 config=release_x86_64
+          make -j2 config=release_x86_64 2>&1 | tee ../../../../turbostroi-build-linux64.log
+
+      - name: Upload build log for troubleshooting
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbostroi-v2.9.0-linux64-build-log
+          path: turbostroi-build-linux64.log
+          if-no-files-found: warn
 
       - name: Verify ELF architecture and stage module
         run: |
           mkdir -p result
           DLL="$(find turbostroi/projects/linux -type f -name 'gmsv_turbostroi_linux64.dll' -print -quit)"
           if [ -z "$DLL" ]; then
-            echo 'Build output gmsv_turbostroi_linux64.dll was not found'
+            echo 'Expected gmsv_turbostroi_linux64.dll was not produced.'
             find turbostroi/projects/linux -type f -name '*.dll' -print
             exit 1
           fi
           file "$DLL"
           readelf -h "$DLL" | grep -F 'Class:'
-          file "$DLL" | grep -q 'ELF 64-bit' || exit 1
+          file "$DLL" | grep -q 'ELF 64-bit'
           cp "$DLL" result/gmsv_turbostroi_linux64.dll
           sha256sum result/gmsv_turbostroi_linux64.dll
 
-      - name: Upload downloadable x64 DLL
+      - name: Upload experimental x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64-experimental
+          name: turbostroi-v2.9.0-linux64-experimental-V7
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
