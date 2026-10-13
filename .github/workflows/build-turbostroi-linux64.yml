@@ -1,4 +1,4 @@
-name: Build TurboStroi v2.9.0 - Linux x64 (experimental V13)
+name: Build TurboStroi v2.9.0 - Linux x64 (experimental V14)
 
 on:
   workflow_dispatch:
@@ -262,6 +262,31 @@ jobs:
           contents = contents.replace(old_read, replacement_read, 1)
           kv.write_text(contents, encoding='utf-8')
           print(f'Patched KeyValues: {kv}')
+
+          # KVPacker contains an independent TYPE_PTR serializer.
+          # Keep the existing 32-bit format, rejecting unrepresentable pointers.
+          packer = sdk / 'tier1/kvpacker.cpp'
+          contents = packer.read_text(encoding='utf-8')
+          old_write = 'buffer.PutUnsignedInt( (int)dat->GetPtr() );'
+          new_write = (
+              'const uintptr_t pointerBits = reinterpret_cast<uintptr_t>(dat->GetPtr());\n'
+              '                if (pointerBits > 0xffffffffULL)\n'
+              '                    return false; // TYPE_PTR pointer does not fit in 32 bits\n'
+              '                buffer.PutUnsignedInt(static_cast<unsigned int>(pointerBits));'
+          )
+          old_read = 'dat->SetPtr( NULL, (void*)buffer.GetUnsignedInt() );'
+          new_read = (
+              'dat->SetPtr( NULL, reinterpret_cast<void*>('
+              'static_cast<uintptr_t>(buffer.GetUnsignedInt())) );'
+          )
+          if contents.count(old_write) != 1 or contents.count(old_read) != 1:
+              raise SystemExit(f'Unexpected KVPacker TYPE_PTR expressions: {packer}')
+          if '#include <stdint.h>' not in contents:
+              contents = '#include <stdint.h>\n' + contents
+          contents = contents.replace(old_write, new_write, 1)
+          contents = contents.replace(old_read, new_read, 1)
+          packer.write_text(contents, encoding='utf-8')
+          print(f'Patched KVPacker: {packer}')
           PY
 
       - name: Verify x64 library and serialization patches
@@ -275,10 +300,14 @@ jobs:
           assert 'TYPE_PTR format can store only 32 bits' in kv
           assert 'buffer.PutUnsignedInt( (int)dat->m_pValue );' not in kv
           assert 'dat->m_pValue = (void*)buffer.GetUnsignedInt();' not in kv
-          print('V13 platform + KeyValues fixes are present')
+          packer = (sdk / 'tier1/kvpacker.cpp').read_text(encoding='utf-8')
+          assert 'TYPE_PTR pointer does not fit in 32 bits' in packer
+          assert 'buffer.PutUnsignedInt( (int)dat->GetPtr() );' not in packer
+          assert 'dat->SetPtr( NULL, (void*)buffer.GetUnsignedInt() );' not in packer
+          print('V14 platform, KeyValues and KVPacker fixes are present')
           PY
 
-      - name: Verify V13 patched headers before compilation
+      - name: Verify V14 patched headers before compilation
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -302,7 +331,7 @@ jobs:
           unpatched = [str(p) for p in matches if old in p.read_text(errors='replace')]
           if unpatched:
               raise SystemExit(f'Unpatched copies remain: {unpatched}')
-          print('V13 CHECK PASSED: No old DataManager pointer cast in source')
+          print('V14 CHECK PASSED: No old DataManager pointer cast in source')
           PY
 
       - name: Compile TurboStroi for Linux x64
@@ -337,6 +366,6 @@ jobs:
       - name: Upload experimental x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64-experimental-V13
+          name: turbostroi-v2.9.0-linux64-experimental-V14
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
