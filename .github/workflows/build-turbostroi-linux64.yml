@@ -29,7 +29,16 @@ jobs:
           curl --fail --location --retry 3 \
             'https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz' \
             --output premake-linux.tar.gz
-          tar -xzf premake-linux.tar.gz premake5
+          mkdir -p premake-unpacked
+          tar -xzf premake-linux.tar.gz -C premake-unpacked
+          echo 'Files inside Premake archive:'
+          find premake-unpacked -maxdepth 5 -type f | head -50
+          PREMAKE_PATH="$(find premake-unpacked -type f -name premake5 -print -quit)"
+          if [ -z "$PREMAKE_PATH" ]; then
+            echo 'ERROR: premake5 binary not found after extraction'
+            exit 1
+          fi
+          cp "$PREMAKE_PATH" ./premake5
           chmod +x premake5
           ./premake5 --version
 
