@@ -54,6 +54,48 @@ jobs:
           ../premake5 lualib2header
           ../premake5 gmake
 
+      - name: Patch 32-bit-only float packing in Source SDK
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('turbostroi/external')
+          candidates = []
+          for p in root.rglob('bitbuf.h'):
+              content = p.read_text()
+              if 'static_assert(sizeof(long) == sizeof(float));' in content:
+                  candidates.append((p, content))
+          if len(candidates) != 1:
+              raise SystemExit(f'Expected exactly one original bitbuf.h, found {len(candidates)}')
+
+          path, content = candidates[0]
+          start = content.find('BITBUF_INLINE void bf_write::WriteBitFloat(float val)')
+          if start == -1:
+              raise SystemExit('WriteBitFloat implementation not found')
+          end = content.find('\n}', start)
+          if end == -1:
+              raise SystemExit('WriteBitFloat function end not found')
+          end += 2
+          original = content[start:end]
+          expected = (
+              'long intVal;',
+              'static_assert(sizeof(long) == sizeof(float));',
+              'intVal = *((long*)&val);',
+              'WriteUBitLong( intVal, 32 );',
+          )
+          if any(part not in original for part in expected):
+              raise SystemExit('Unexpected WriteBitFloat implementation; refusing to patch')
+
+          updated = (original
+              .replace('long intVal;', 'unsigned int intVal = 0;')
+              .replace('static_assert(sizeof(long) == sizeof(float));',
+                       'static_assert(sizeof(unsigned int) == sizeof(float));')
+              .replace('intVal = *((long*)&val);',
+                       '__builtin_memcpy(&intVal, &val, sizeof(val));'))
+          path.write_text(content[:start] + updated + content[end:])
+          print(f'Patched float encoding in {path}')
+          PY
+
       - name: Compile TurboStroi for Linux x64
         run: |
           cd turbostroi/projects/linux/gmake
@@ -77,6 +119,6 @@ jobs:
       - name: Upload downloadable x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64
+          name: turbostroi-v2.9.0-linux64-experimental
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
