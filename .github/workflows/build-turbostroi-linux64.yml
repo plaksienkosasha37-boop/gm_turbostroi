@@ -1,7 +1,10 @@
-name: Build TurboStroi v2.9.0 - Linux x64 (experimental V11)
+name: Build TurboStroi v2.9.0 - Linux x64 (experimental V14)
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/build-turbostroi-linux64.yml'
 
 permissions:
   contents: read
@@ -215,11 +218,100 @@ jobs:
           print(f'Patched packed handle conversion in {header} and {source}')
           PY
 
-      - name: Verify V11 patched headers before compilation
+      - name: Patch Linux x64 library handles and KeyValues serialization
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          print('V11: checking all datamanager.h files in downloaded source')
+
+          sdk = Path('turbostroi/external/garrysmod_common/sourcesdk-minimal')
+          # Linux dlopen() returns a pointer; HMODULE must be pointer-sized.
+          platform = sdk / 'public/tier0/platform.h'
+          contents = platform.read_text(encoding='utf-8')
+          original = 'typedef uint32 HMODULE;'
+          replacement = ('#if defined(__linux__) && defined(__x86_64__)\n'
+                         'typedef void *HMODULE;\n'
+                         '#else\n'
+                         'typedef uint32 HMODULE;\n'
+                         '#endif')
+          if contents.count(original) != 1:
+              raise SystemExit(f'Unexpected HMODULE declaration: {platform}')
+          platform.write_text(contents.replace(original, replacement, 1), encoding='utf-8')
+          print(f'Patched HMODULE: {platform}')
+
+          # Preserve existing 32-bit TYPE_PTR wire format; do not truncate
+          # real 64-bit addresses silently.
+          kv = sdk / 'tier1/keyvalues.cpp'
+          contents = kv.read_text(encoding='utf-8')
+          old_write = 'buffer.PutUnsignedInt( (int)dat->m_pValue );'
+          replacement_write = (
+              'const uintptr_t pointerBits = reinterpret_cast<uintptr_t>(dat->m_pValue);\n'
+              '                if (pointerBits > 0xffffffffULL)\n'
+              '                    return false; // TYPE_PTR format can store only 32 bits\n'
+              '                buffer.PutUnsignedInt(static_cast<unsigned int>(pointerBits));'
+          )
+          old_read = 'dat->m_pValue = (void*)buffer.GetUnsignedInt();'
+          replacement_read = (
+              'dat->m_pValue = reinterpret_cast<void*>('
+              'static_cast<uintptr_t>(buffer.GetUnsignedInt()));'
+          )
+          if contents.count(old_write) != 1 or contents.count(old_read) != 1:
+              raise SystemExit(f'Unexpected TYPE_PTR statements: {kv}')
+          if '#include <stdint.h>' not in contents:
+              contents = '#include <stdint.h>\n' + contents
+          contents = contents.replace(old_write, replacement_write, 1)
+          contents = contents.replace(old_read, replacement_read, 1)
+          kv.write_text(contents, encoding='utf-8')
+          print(f'Patched KeyValues: {kv}')
+
+          # KVPacker contains an independent TYPE_PTR serializer.
+          # Keep the existing 32-bit format, rejecting unrepresentable pointers.
+          packer = sdk / 'tier1/kvpacker.cpp'
+          contents = packer.read_text(encoding='utf-8')
+          old_write = 'buffer.PutUnsignedInt( (int)dat->GetPtr() );'
+          new_write = (
+              'const uintptr_t pointerBits = reinterpret_cast<uintptr_t>(dat->GetPtr());\n'
+              '                if (pointerBits > 0xffffffffULL)\n'
+              '                    return false; // TYPE_PTR pointer does not fit in 32 bits\n'
+              '                buffer.PutUnsignedInt(static_cast<unsigned int>(pointerBits));'
+          )
+          old_read = 'dat->SetPtr( NULL, (void*)buffer.GetUnsignedInt() );'
+          new_read = (
+              'dat->SetPtr( NULL, reinterpret_cast<void*>('
+              'static_cast<uintptr_t>(buffer.GetUnsignedInt())) );'
+          )
+          if contents.count(old_write) != 1 or contents.count(old_read) != 1:
+              raise SystemExit(f'Unexpected KVPacker TYPE_PTR expressions: {packer}')
+          if '#include <stdint.h>' not in contents:
+              contents = '#include <stdint.h>\n' + contents
+          contents = contents.replace(old_write, new_write, 1)
+          contents = contents.replace(old_read, new_read, 1)
+          packer.write_text(contents, encoding='utf-8')
+          print(f'Patched KVPacker: {packer}')
+          PY
+
+      - name: Verify x64 library and serialization patches
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          sdk = Path('turbostroi/external/garrysmod_common/sourcesdk-minimal')
+          platform = (sdk / 'public/tier0/platform.h').read_text(encoding='utf-8')
+          kv = (sdk / 'tier1/keyvalues.cpp').read_text(encoding='utf-8')
+          assert 'typedef void *HMODULE;' in platform
+          assert 'TYPE_PTR format can store only 32 bits' in kv
+          assert 'buffer.PutUnsignedInt( (int)dat->m_pValue );' not in kv
+          assert 'dat->m_pValue = (void*)buffer.GetUnsignedInt();' not in kv
+          packer = (sdk / 'tier1/kvpacker.cpp').read_text(encoding='utf-8')
+          assert 'TYPE_PTR pointer does not fit in 32 bits' in packer
+          assert 'buffer.PutUnsignedInt( (int)dat->GetPtr() );' not in packer
+          assert 'dat->SetPtr( NULL, (void*)buffer.GetUnsignedInt() );' not in packer
+          print('V14 platform, KeyValues and KVPacker fixes are present')
+          PY
+
+      - name: Verify V14 patched headers before compilation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          print('V13: checking all datamanager.h files in downloaded source')
           matches = list(Path('turbostroi').rglob('datamanager.h'))
           if not matches:
               raise SystemExit('No datamanager.h found!')
@@ -239,7 +331,7 @@ jobs:
           unpatched = [str(p) for p in matches if old in p.read_text(errors='replace')]
           if unpatched:
               raise SystemExit(f'Unpatched copies remain: {unpatched}')
-          print('V11 CHECK PASSED: No old DataManager pointer cast in source')
+          print('V14 CHECK PASSED: No old DataManager pointer cast in source')
           PY
 
       - name: Compile TurboStroi for Linux x64
@@ -274,6 +366,6 @@ jobs:
       - name: Upload experimental x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64-experimental-V11
+          name: turbostroi-v2.9.0-linux64-experimental-V14
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
