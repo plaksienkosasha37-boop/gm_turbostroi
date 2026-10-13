@@ -1,0 +1,74 @@
+name: Build TurboStroi v2.9.0 - Linux x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl tar file binutils
+
+      - name: Download exact v2.9.0 source and git submodules
+        run: |
+          git clone --depth 1 --branch v2.9.0 --recurse-submodules \
+            https://github.com/kosmik641/gm_turbostroi.git turbostroi
+          cd turbostroi
+          git submodule update --init --recursive
+          git describe --tags --always
+
+      - name: Download Premake 5 for Linux
+        run: |
+          curl --fail --location --retry 3 \
+            'https://github.com/premake/premake-core/releases/download/v5.0.0/premake-5.0.0-linux.tar.gz' \
+            --output premake-linux.tar.gz
+          tar -xzf premake-linux.tar.gz premake5
+          chmod +x premake5
+          ./premake5 --version
+
+      - name: Compile 64-bit LuaJIT static library
+        run: |
+          cd turbostroi
+          make -C external/luajit -j2 BUILDMODE=static XCFLAGS=-fPIC
+          mkdir -p external/luajit/linux64
+          cp external/luajit/src/libluajit.a external/luajit/linux64/libluajit.a
+
+      - name: Generate x64 build files
+        run: |
+          cd turbostroi
+          ../premake5 lualib2header
+          ../premake5 gmake
+
+      - name: Compile TurboStroi for Linux x64
+        run: |
+          cd turbostroi/projects/linux/gmake
+          make -j2 config=release_x86_64
+
+      - name: Verify ELF architecture and stage module
+        run: |
+          mkdir -p result
+          DLL="$(find turbostroi/projects/linux -type f -name 'gmsv_turbostroi_linux64.dll' -print -quit)"
+          if [ -z "$DLL" ]; then
+            echo 'Build output gmsv_turbostroi_linux64.dll was not found'
+            find turbostroi/projects/linux -type f -name '*.dll' -print
+            exit 1
+          fi
+          file "$DLL"
+          readelf -h "$DLL" | grep -F 'Class:'
+          file "$DLL" | grep -q 'ELF 64-bit' || exit 1
+          cp "$DLL" result/gmsv_turbostroi_linux64.dll
+          sha256sum result/gmsv_turbostroi_linux64.dll
+
+      - name: Upload downloadable x64 DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbostroi-v2.9.0-linux64
+          path: result/gmsv_turbostroi_linux64.dll
+          if-no-files-found: error
