@@ -14,7 +14,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git curl tar file binutils
+          sudo apt-get install -y build-essential git curl tar file binutils uuid-dev
 
       - name: Download exact v2.9.0 source and git submodules
         run: |
@@ -24,22 +24,21 @@ jobs:
           git submodule update --init --recursive
           git describe --tags --always
 
-      - name: Download compatible Premake 5 beta7 for Linux
+      - name: Build Premake 5 beta7 from source on Ubuntu 22.04
         run: |
-          curl --fail --location --retry 3 \
-            'https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-linux.tar.gz' \
-            --output premake-linux.tar.gz
-          mkdir -p premake-unpacked
-          tar -xzf premake-linux.tar.gz -C premake-unpacked
-          echo 'Files inside Premake archive:'
-          find premake-unpacked -maxdepth 5 -type f | head -50
-          PREMAKE_PATH="$(find premake-unpacked -type f -name premake5 -print -quit)"
+          git clone --depth 1 --branch v5.0.0-beta7 --recurse-submodules \
+            https://github.com/premake/premake-core.git premake-source
+          cd premake-source
+          make -f Bootstrap.mak linux
+          cd ..
+          PREMAKE_PATH="$(find premake-source -type f -name premake5 -print -quit)"
           if [ -z "$PREMAKE_PATH" ]; then
-            echo 'ERROR: premake5 binary not found after extraction'
+            echo 'ERROR: Premake binary was not produced by bootstrap.'
+            find premake-source -type f -name '*premake*' | head -30
             exit 1
           fi
           cp "$PREMAKE_PATH" ./premake5
-          chmod +x premake5
+          chmod +x ./premake5
           ./premake5 --version
 
       - name: Compile 64-bit LuaJIT static library
