@@ -1,4 +1,4 @@
-name: Build TurboStroi v2.9.0 - Linux x64 (experimental V9)
+name: Build TurboStroi v2.9.0 - Linux x64 (experimental V11)
 
 on:
   workflow_dispatch:
@@ -187,6 +187,59 @@ jobs:
               crc_text = '#include <stdint.h>\n' + crc_text
           crc.write_text(crc_text.replace(before, after, 1), encoding='utf-8')
           print(f'Patched pointer alignment in {crc}')
+
+          # memhandle_t is a 32-bit PACKED identifier stored in an opaque pointer
+          # (16-bit serial + 16-bit index), not a dereferenceable memory address.
+          # Preserve the 32-bit handle format; use uintptr_t for conversions.
+          manager_headers = list(sdk.rglob('datamanager.h'))
+          manager_sources = list(sdk.rglob('datamanager.cpp'))
+          if len(manager_headers) != 1 or len(manager_sources) != 1:
+              raise SystemExit(f'Unexpected data-manager files: {manager_headers}, {manager_sources}')
+          header, source = manager_headers[0], manager_sources[0]
+          h = header.read_text(encoding='utf-8')
+          c = source.read_text(encoding='utf-8')
+          old_h = 'unsigned int fullWord = (unsigned int)handle;'
+          new_h = 'uintptr_t fullWord = reinterpret_cast<uintptr_t>(handle);'
+          if h.count(old_h) != 1:
+              raise SystemExit(f'{header}: unexpected FromHandle; no changes made')
+          old_c = 'return (memhandle_t)( hiword|index );'
+          new_c = 'return reinterpret_cast<memhandle_t>(static_cast<uintptr_t>(hiword | index));'
+          if c.count(old_c) != 1:
+              raise SystemExit(f'{source}: unexpected ToHandle; no changes made')
+          if '#include <stdint.h>' not in h:
+              h = '#include <stdint.h>\n' + h
+          if '#include <stdint.h>' not in c:
+              c = '#include <stdint.h>\n' + c
+          header.write_text(h.replace(old_h, new_h, 1), encoding='utf-8')
+          source.write_text(c.replace(old_c, new_c, 1), encoding='utf-8')
+          print(f'Patched packed handle conversion in {header} and {source}')
+          PY
+
+      - name: Verify V11 patched headers before compilation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          print('V11: checking all datamanager.h files in downloaded source')
+          matches = list(Path('turbostroi').rglob('datamanager.h'))
+          if not matches:
+              raise SystemExit('No datamanager.h found!')
+          old = 'unsigned int fullWord = (unsigned int)handle;'
+          new = 'uintptr_t fullWord = reinterpret_cast<uintptr_t>(handle);'
+          for path in matches:
+              content = path.read_text(errors='replace')
+              print(f'{path}: old={old in content}, new={new in content}')
+              for i, line in enumerate(content.splitlines(), 1):
+                  if 'fullWord' in line or ('FromHandle' in line and 'inline' in line):
+                      print(f'  {i}: {line.strip()}')
+          expected = Path('turbostroi/external/garrysmod_common/sourcesdk-minimal/public/tier1/datamanager.h')
+          if not expected.exists():
+              raise SystemExit(f'Expected SDK header not found: {expected}')
+          if new not in expected.read_text():
+              raise SystemExit(f'Patch not applied to compiler SDK header: {expected}')
+          unpatched = [str(p) for p in matches if old in p.read_text(errors='replace')]
+          if unpatched:
+              raise SystemExit(f'Unpatched copies remain: {unpatched}')
+          print('V11 CHECK PASSED: No old DataManager pointer cast in source')
           PY
 
       - name: Compile TurboStroi for Linux x64
@@ -221,6 +274,6 @@ jobs:
       - name: Upload experimental x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64-experimental-V9
+          name: turbostroi-v2.9.0-linux64-experimental-V11
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
