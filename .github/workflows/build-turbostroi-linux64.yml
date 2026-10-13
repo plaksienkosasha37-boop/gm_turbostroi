@@ -10,7 +10,6 @@ jobs:
   build-linux64:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
-
     steps:
       - name: Install build tools
         run: |
@@ -95,38 +94,38 @@ jobs:
               CInterlockedIntT() : m_value(0) { static_assert(sizeof(T) == 4, "32-bit atomic required"); }
               CInterlockedIntT(T value) : m_value(value) { static_assert(sizeof(T) == 4, "32-bit atomic required"); }
 
-              T GetRaw() const { return atomic_load_n(&m_value, ATOMIC_SEQ_CST); }
+              T GetRaw() const { return __atomic_load_n(&m_value, __ATOMIC_SEQ_CST); }
               operator T() const { return GetRaw(); }
               bool operator!() const { return GetRaw() == 0; }
               bool operator==(T rhs) const { return GetRaw() == rhs; }
               bool operator!=(T rhs) const { return GetRaw() != rhs; }
 
-              T operator++() { return atomic_add_fetch(&m_value, T(1), ATOMIC_SEQ_CST); }
-              T operator++(int) { return atomic_fetch_add(&m_value, T(1), ATOMIC_SEQ_CST); }
-              T operator--() { return atomic_sub_fetch(&m_value, T(1), ATOMIC_SEQ_CST); }
-              T operator--(int) { return atomic_fetch_sub(&m_value, T(1), ATOMIC_SEQ_CST); }
+              T operator++() { return __atomic_add_fetch(&m_value, T(1), __ATOMIC_SEQ_CST); }
+              T operator++(int) { return __atomic_fetch_add(&m_value, T(1), __ATOMIC_SEQ_CST); }
+              T operator--() { return __atomic_sub_fetch(&m_value, T(1), __ATOMIC_SEQ_CST); }
+              T operator--(int) { return __atomic_fetch_sub(&m_value, T(1), __ATOMIC_SEQ_CST); }
 
               bool AssignIf(T conditionValue, T newValue)
               {
                   return __atomic_compare_exchange_n(&m_value, &conditionValue, newValue,
-                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+                      false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
               }
-              T operator=(T newValue) { atomic_store_n(&m_value, newValue, ATOMIC_SEQ_CST); return newValue; }
-              void operator+=(T add) { atomic_fetch_add(&m_value, add, ATOMIC_SEQ_CST); }
-              void operator-=(T subtract) { atomic_fetch_sub(&m_value, subtract, ATOMIC_SEQ_CST); }
+              T operator=(T newValue) { __atomic_store_n(&m_value, newValue, __ATOMIC_SEQ_CST); return newValue; }
+              void operator+=(T add) { __atomic_fetch_add(&m_value, add, __ATOMIC_SEQ_CST); }
+              void operator-=(T subtract) { __atomic_fetch_sub(&m_value, subtract, __ATOMIC_SEQ_CST); }
               void operator*=(T multiplier)
               {
                   T oldValue = GetRaw(), newValue;
                   do { newValue = oldValue * multiplier; }
                   while (!__atomic_compare_exchange_n(&m_value, &oldValue, newValue,
-                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST));
+                      false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
               }
               void operator/=(T divisor)
               {
                   T oldValue = GetRaw(), newValue;
                   do { newValue = oldValue / divisor; }
                   while (!__atomic_compare_exchange_n(&m_value, &oldValue, newValue,
-                      false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST));
+                      false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
               }
               T operator+(T rhs) const { return GetRaw() + rhs; }
               T operator-(T rhs) const { return GetRaw() - rhs; }
@@ -136,7 +135,7 @@ jobs:
           };
           '''
           patched = (
-              '#if defined(linux) && defined(x86_64)\n'
+              '#if defined(__linux__) && defined(__x86_64__)\n'
               + atomic_64
               + '#else\n'
               + original
@@ -173,7 +172,8 @@ jobs:
           bitbuf.write_text(text[:begin] + new + text[end:], encoding='utf-8')
           print(f'Patched {bitbuf}')
           PY
-          - name: Compile TurboStroi for Linux x64
+
+      - name: Compile TurboStroi for Linux x64
         run: |
           set -o pipefail
           cd turbostroi/projects/linux/gmake
