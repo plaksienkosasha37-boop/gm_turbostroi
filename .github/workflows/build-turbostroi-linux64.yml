@@ -24,10 +24,10 @@ jobs:
           git submodule update --init --recursive
           git describe --tags --always
 
-      - name: Download Premake 5 for Linux
+      - name: Download compatible Premake 5 beta2 for Linux
         run: |
           curl --fail --location --retry 3 \
-            'https://github.com/premake/premake-core/releases/download/v5.0.0/premake-5.0.0-linux.tar.gz' \
+            'https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz' \
             --output premake-linux.tar.gz
           tar -xzf premake-linux.tar.gz premake5
           chmod +x premake5
