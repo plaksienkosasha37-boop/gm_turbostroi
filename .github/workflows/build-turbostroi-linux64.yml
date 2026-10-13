@@ -1,4 +1,4 @@
-name: Build TurboStroi v2.9.0 - Linux x64 (experimental V8)
+name: Build TurboStroi v2.9.0 - Linux x64 (experimental V9)
 
 on:
   workflow_dispatch:
@@ -171,6 +171,22 @@ jobs:
                              '__builtin_memcpy(&intVal, &val, sizeof(val));'))
           bitbuf.write_text(text[:begin] + new + text[end:], encoding='utf-8')
           print(f'Patched {bitbuf}')
+
+          # checksum_crc.cpp calculates a 0..3 alignment offset from a pointer.
+          # On LP64, first convert to a pointer-sized integer, then mask it.
+          crc_files = list(sdk.rglob('checksum_crc.cpp'))
+          if len(crc_files) != 1:
+              raise SystemExit(f'Expected 1 checksum_crc.cpp, found {len(crc_files)}')
+          crc = crc_files[0]
+          crc_text = crc.read_text(encoding='utf-8')
+          before = 'nFront = ((unsigned int)pb) & 3;'
+          after = 'nFront = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(pb) & 3u);'
+          if crc_text.count(before) != 1:
+              raise SystemExit('Unexpected nFront pointer-alignment expression in checksum_crc.cpp')
+          if '#include <stdint.h>' not in crc_text:
+              crc_text = '#include <stdint.h>\n' + crc_text
+          crc.write_text(crc_text.replace(before, after, 1), encoding='utf-8')
+          print(f'Patched pointer alignment in {crc}')
           PY
 
       - name: Compile TurboStroi for Linux x64
@@ -205,6 +221,6 @@ jobs:
       - name: Upload experimental x64 DLL
         uses: actions/upload-artifact@v4
         with:
-          name: turbostroi-v2.9.0-linux64-experimental-V8
+          name: turbostroi-v2.9.0-linux64-experimental-V9
           path: result/gmsv_turbostroi_linux64.dll
           if-no-files-found: error
