@@ -1,0 +1,100 @@
+name: Build TurboStroi Rust v3.1.1 - Linux x64
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/build-turbostroi-rust-v3.1.1-linux64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout upstream TurboStroi v3.1.1
+        uses: actions/checkout@v4
+        with:
+          repository: SmileDoge/gm_turbostroi_rust
+          ref: v3.1.1
+          path: turbostroi
+          persist-credentials: false
+
+      - name: Verify exact source revision
+        run: |
+          test "$(git -C turbostroi rev-parse HEAD)" = "418493540d3eab99e0fae712f631d31e33c6349c"
+          grep -F 'version = "3.1.1"' turbostroi/Cargo.toml
+
+      - name: Install Rust Linux x64 toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install ELF inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential binutils file
+
+      - name: Use pinned HTTPS mirror for original lua-shared dependency
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("turbostroi/Cargo.toml")
+          s = p.read_text()
+          old = 'lua-shared = {git = "http://git.thetha.wtf/ivogel/lua-shared.git"}'
+          new = 'lua-shared = {git = "https://github.com/IVogel/lua-shared.git", rev = "ccd4116fe26b3fb9f52722bec38866cc6f3c7fdb"}'
+          if s.count(old) != 1:
+              raise SystemExit("Unexpected upstream Cargo.toml dependency; refusing to modify")
+          p.write_text(s.replace(old, new, 1))
+          print("Pinned lua-shared source to public GitHub mirror (2023 revision)")
+          PY
+
+      - name: Compile Rust module for Linux x64
+        run: |
+          set -o pipefail
+          cd turbostroi
+          cargo build --release --target x86_64-unknown-linux-gnu 2>&1 | tee "$GITHUB_WORKSPACE/turbostroi-rust-v3.1.1-build.log"
+
+      - name: Upload build log for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbostroi-rust-v3.1.1-linux64-build-log
+          path: turbostroi-rust-v3.1.1-build.log
+          if-no-files-found: warn
+
+      - name: Verify ELF architecture and required exports
+        run: |
+          set -euo pipefail
+          BIN="turbostroi/target/x86_64-unknown-linux-gnu/release/libgm_turbostroi_rust.so"
+          test -s "$BIN"
+          file "$BIN"
+          file "$BIN" | grep -q 'ELF 64-bit'
+          readelf -h "$BIN" | grep -q 'Advanced Micro Devices X86-64'
+          nm -D "$BIN" | grep -E ' gmod13_(open|close)$'
+          nm -D "$BIN" | grep -q ' gmod13_open$'
+          nm -D "$BIN" | grep -q ' gmod13_close$'
+          mkdir -p result
+          cp "$BIN" result/gmsv_turbostroi_linux64.dll
+          readelf -d "$BIN" | grep NEEDED > result/needed-libraries.txt || true
+          sha256sum result/gmsv_turbostroi_linux64.dll > result/sha256.txt
+
+      - name: Get matching Metrostroi Lua script from v3.1.1
+        run: |
+          curl --fail --location --retry 3 \
+            --output result/sv_turbostroi_v3.lua \
+            https://github.com/SmileDoge/gm_turbostroi_rust/releases/download/v3.1.1/sv_turbostroi_v3.lua
+          test "$(wc -c < result/sv_turbostroi_v3.lua)" -gt 10000
+          sha256sum result/sv_turbostroi_v3.lua >> result/sha256.txt
+
+      - name: Upload experimental Linux x64 files
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbostroi-rust-v3.1.1-linux64-experimental
+          path: result/
+          if-no-files-found: error
